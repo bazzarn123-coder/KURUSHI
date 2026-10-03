@@ -144,7 +144,7 @@
             background: rgba(180, 180, 180, 0.7);
             border: 2px solid #ffffff;
             pointer-events: none;
-            transition: transform 0.05s ease-out;
+            transition: transform 0.02s ease-out;
         }
         
         .touch-btn {
@@ -269,7 +269,7 @@
             level: 1, score: 0,
             gridWidth: 8, gridLength: 32,
             minZ: -24,
-            playerX: 3, playerZ: 27,
+            playerX: 3.0, playerZ: 27.0, // Continuous float positions
             markX: -1, markZ: -1,
             advMarks: [],
             cubes: [],
@@ -280,13 +280,14 @@
             waveTransitioning: false
         };
 
+        const PLAYER_SPEED = 6.0; // Units per second for smooth movement
         const TICK_RATE_BASE = 2200;
+        let lastFrameTime = performance.now();
         let lastTickTime = 0;
 
-        // Input holding state for continuous movement
-        let moveInput = { dx: 0, dz: 0 };
-        let lastMoveTime = 0;
-        const MOVE_REPEAT_INTERVAL = 130;
+        // Input vectors
+        let joystickVector = { x: 0, z: 0 };
+        let keysPressed = {};
 
         // --- THREE.JS SETUP ---
         const scene = new THREE.Scene();
@@ -375,7 +376,6 @@
 
             const geoFloor = new THREE.BoxGeometry(0.95, 0.5, 0.95);
 
-            // Build full runway from minZ (-24) to gridLength - 1
             for(let z = gameState.minZ; z < gameState.gridLength; z++) {
                 floorBlocks[z] = [];
                 for(let x = 0; x < gameState.gridWidth; x++) {
@@ -405,11 +405,9 @@
 
             const geoCube = new THREE.BoxGeometry(0.95, 0.95, 0.95);
             
-            // Depth increases by 1 every 4 waves (Level 1-4: depth 2, Level 5-8: depth 3, etc.)
             let waveRows = Math.floor((gameState.level - 1) / 4) + 2;
             if (waveRows > 14) waveRows = 14;
 
-            // Spawn at the far end of the runway (-24)
             let zStart = gameState.minZ + 2;
 
             for(let z = 0; z < waveRows; z++) {
@@ -443,7 +441,7 @@
                 floorBlocks[rowToDrop].forEach(block => { block.position.y -= 10; });
             }
 
-            if (gameState.playerZ >= rowToDrop || gameState.lostRows >= 8) {
+            if (gameState.playerZ >= rowToDrop - 0.2 || gameState.lostRows >= 8) {
                 gameOver();
             }
         }
@@ -486,28 +484,42 @@
             setTimeout(() => msg.innerText = "", 1500);
         }
 
-        // --- CONTROLS LOGIC ---
-        function movePlayer(dx, dz) {
-            if(!gameState.isPlaying) return;
-            let nx = gameState.playerX + dx;
-            let nz = gameState.playerZ + dz;
+        // --- SMOOTH COLLISION & MOVEMENT LOGIC ---
+        function checkCollisionAt(nx, nz) {
             let maxZ = gameState.gridLength - 1 - gameState.lostRows;
+            
+            // Boundary checks
+            if (nx < 0 || nx > gameState.gridWidth - 1 || nz < gameState.minZ || nz > maxZ) {
+                return true;
+            }
 
-            // Allow movement across the entire runway from minZ to maxZ
-            if(nx >= 0 && nx < gameState.gridWidth && nz >= gameState.minZ && nz <= maxZ) {
-                let blocked = gameState.cubes.some(c => c.active && c.x === nx && c.z === nz);
-                if(!blocked) {
-                    gameState.playerX = nx;
-                    gameState.playerZ = nz;
+            // Bounding radius collision with active cubes
+            const playerRadius = 0.35;
+            const cubeRadius = 0.45;
+            for (let c of gameState.cubes) {
+                if (c.active) {
+                    let cz = c.mesh ? c.mesh.position.z : c.z;
+                    if (Math.abs(nx - c.x) < (playerRadius + cubeRadius) && Math.abs(nz - cz) < (playerRadius + cubeRadius)) {
+                        return true;
+                    }
                 }
             }
+            return false;
         }
 
         function triggerActionSpace() {
             if(!gameState.isPlaying) return;
+            
+            // Snap mark location to nearest tile grid center
+            let roundedX = Math.round(gameState.playerX);
+            let roundedZ = Math.round(gameState.playerZ);
+            roundedX = Math.max(0, Math.min(gameState.gridWidth - 1, roundedX));
+            let maxZ = gameState.gridLength - 1 - gameState.lostRows;
+            roundedZ = Math.max(gameState.minZ, Math.min(maxZ, roundedZ));
+
             if(gameState.markX === -1) {
-                gameState.markX = gameState.playerX;
-                gameState.markZ = gameState.playerZ;
+                gameState.markX = roundedX;
+                gameState.markZ = roundedZ;
                 markMesh.position.set(gameState.markX, 0.01, gameState.markZ);
                 markMesh.visible = true;
                 playSound('mark');
@@ -544,46 +556,23 @@
             }
         }
 
-        // Keyboard Event Handlers (Support Hold-to-Move)
+        // Key Listeners
         window.addEventListener('keydown', (e) => {
-            let dx = 0, dz = 0;
-            if(e.code === 'ArrowUp' || e.code === 'KeyW') dz = -1;
-            if(e.code === 'ArrowDown' || e.code === 'KeyS') dz = 1;
-            if(e.code === 'ArrowLeft' || e.code === 'KeyA') dx = -1;
-            if(e.code === 'ArrowRight' || e.code === 'KeyD') dx = 1;
-
-            if(dx !== 0 || dz !== 0) {
-                if(moveInput.dx !== dx || moveInput.dz !== dz) {
-                    moveInput.dx = dx;
-                    moveInput.dz = dz;
-                    movePlayer(dx, dz);
-                    lastMoveTime = performance.now();
-                }
-            }
-
+            keysPressed[e.code] = true;
             if(e.code === 'Space') { e.preventDefault(); triggerActionSpace(); }
             if(e.code === 'KeyZ' || e.code === 'ShiftLeft' || e.code === 'KeyX') { e.preventDefault(); triggerActionZ(); }
         });
 
         window.addEventListener('keyup', (e) => {
-            let dx = 0, dz = 0;
-            if(e.code === 'ArrowUp' || e.code === 'KeyW') dz = -1;
-            if(e.code === 'ArrowDown' || e.code === 'KeyS') dz = 1;
-            if(e.code === 'ArrowLeft' || e.code === 'KeyA') dx = -1;
-            if(e.code === 'ArrowRight' || e.code === 'KeyD') dx = 1;
-
-            if((dx !== 0 && moveInput.dx === dx) || (dz !== 0 && moveInput.dz === dz)) {
-                moveInput.dx = 0;
-                moveInput.dz = 0;
-            }
+            keysPressed[e.code] = false;
         });
 
-        // --- GRAY VIRTUAL JOYSTICK LOGIC ---
+        // --- ANALOG JOYSTICK LOGIC ---
         const joystickBase = document.getElementById('joystick-base');
         const joystickStick = document.getElementById('joystick-stick');
         let joystickActive = false;
         let joystickCenter = { x: 0, y: 0 };
-        const maxRadius = 35;
+        const maxRadius = 38;
 
         function getClientCoords(e) {
             if (e.touches && e.touches.length > 0) {
@@ -616,18 +605,13 @@
 
             joystickStick.style.transform = `translate(${dx}px, ${dy}px)`;
 
-            const deadzone = 10;
+            const deadzone = 6;
             if (dist > deadzone) {
-                if (Math.abs(dx) > Math.abs(dy)) {
-                    moveInput.dx = dx > 0 ? 1 : -1;
-                    moveInput.dz = 0;
-                } else {
-                    moveInput.dx = 0;
-                    moveInput.dz = dy > 0 ? 1 : -1;
-                }
+                joystickVector.x = dx / maxRadius;
+                joystickVector.z = dy / maxRadius;
             } else {
-                moveInput.dx = 0;
-                moveInput.dz = 0;
+                joystickVector.x = 0;
+                joystickVector.z = 0;
             }
         }
 
@@ -636,8 +620,8 @@
             e.preventDefault();
             joystickActive = false;
             joystickStick.style.transform = `translate(0px, 0px)`;
-            moveInput.dx = 0;
-            moveInput.dz = 0;
+            joystickVector.x = 0;
+            joystickVector.z = 0;
         }
 
         joystickBase.addEventListener('mousedown', startJoystick);
@@ -694,20 +678,64 @@
         function gameLoop(time) {
             requestAnimationFrame(gameLoop);
 
+            let dt = (time - lastFrameTime) / 1000.0;
+            if (dt > 0.1) dt = 0.1; // Cap delta time
+            lastFrameTime = time;
+
             if(gameState.isPlaying) {
-                if(moveInput.dx !== 0 || moveInput.dz !== 0) {
-                    if(time - lastMoveTime > MOVE_REPEAT_INTERVAL) {
-                        movePlayer(moveInput.dx, moveInput.dz);
-                        lastMoveTime = time;
-                    }
+                // Compute combined direction vector from Joystick & Keyboard
+                let kbX = 0, kbZ = 0;
+                if(keysPressed['ArrowUp'] || keysPressed['KeyW']) kbZ -= 1;
+                if(keysPressed['ArrowDown'] || keysPressed['KeyS']) kbZ += 1;
+                if(keysPressed['ArrowLeft'] || keysPressed['KeyA']) kbX -= 1;
+                if(keysPressed['ArrowRight'] || keysPressed['KeyD']) kbX += 1;
+
+                if (kbX !== 0 && kbZ !== 0) {
+                    kbX *= 0.7071;
+                    kbZ *= 0.7071;
                 }
 
-                // Smooth position interpolation
-                playerGroup.position.x += (gameState.playerX - playerGroup.position.x) * 0.2;
-                playerGroup.position.z += (gameState.playerZ - playerGroup.position.z) * 0.2;
+                let moveX = joystickVector.x !== 0 ? joystickVector.x : kbX;
+                let moveZ = joystickVector.z !== 0 ? joystickVector.z : kbZ;
+
+                let moveMag = Math.sqrt(moveX * moveX + moveZ * moveZ);
+                if (moveMag > 1) {
+                    moveX /= moveMag;
+                    moveZ /= moveMag;
+                    moveMag = 1;
+                }
+
+                if (moveMag > 0.05) {
+                    let stepX = moveX * PLAYER_SPEED * dt;
+                    let stepZ = moveZ * PLAYER_SPEED * dt;
+
+                    // Smooth wall/cube sliding physics
+                    let nextX = gameState.playerX + stepX;
+                    let nextZ = gameState.playerZ + stepZ;
+
+                    if (!checkCollisionAt(nextX, nextZ)) {
+                        gameState.playerX = nextX;
+                        gameState.playerZ = nextZ;
+                    } else if (!checkCollisionAt(nextX, gameState.playerZ)) {
+                        gameState.playerX = nextX;
+                    } else if (!checkCollisionAt(gameState.playerX, nextZ)) {
+                        gameState.playerZ = nextZ;
+                    }
+
+                    // Smooth character turning
+                    let targetAngle = Math.atan2(moveX, moveZ);
+                    let angleDiff = targetAngle - playerGroup.rotation.y;
+                    while (angleDiff < -Math.PI) angleDiff += Math.PI * 2;
+                    while (angleDiff > Math.PI) angleDiff -= Math.PI * 2;
+                    playerGroup.rotation.y += angleDiff * 0.25;
+                }
+
+                // Smooth position sync with mesh
+                playerGroup.position.x += (gameState.playerX - playerGroup.position.x) * 0.4;
+                playerGroup.position.z += (gameState.playerZ - playerGroup.position.z) * 0.4;
                 playerGroup.position.y = 0;
 
-                // --- DYNAMIC CAMERA ---
+                // --- DYNAMIC CAMERA TRACKING ---
                 let targetCamX = playerGroup.position.x;
                 let targetCamY = 9.5;
                 let targetCamZ = playerGroup.position.z + 6;
@@ -718,19 +746,18 @@
                 
                 camera.lookAt(playerGroup.position.x, 0, playerGroup.position.z - 5);
 
-                // Running animation
-                let isMoving = Math.abs(playerGroup.position.x - gameState.playerX) > 0.005 || Math.abs(playerGroup.position.z - gameState.playerZ) > 0.005 || moveInput.dx !== 0 || moveInput.dz !== 0;
-                if (isMoving) {
-                    let runCycle = time * 0.025;
+                // Smooth running animation
+                if (moveMag > 0.1) {
+                    let runCycle = time * 0.022 * (moveMag + 0.3);
                     leftLeg.rotation.x = Math.sin(runCycle) * 0.7;
                     rightLeg.rotation.x = -Math.sin(runCycle) * 0.7;
                     leftArm.rotation.x = -Math.sin(runCycle) * 0.7;
                     rightArm.rotation.x = Math.sin(runCycle) * 0.7;
                 } else {
-                    leftLeg.rotation.x = 0;
-                    rightLeg.rotation.x = 0;
-                    leftArm.rotation.x = 0;
-                    rightArm.rotation.x = 0;
+                    leftLeg.rotation.x *= 0.8;
+                    rightLeg.rotation.x *= 0.8;
+                    leftArm.rotation.x *= 0.8;
+                    rightArm.rotation.x *= 0.8;
                 }
 
                 let tickRate = Math.max(600, TICK_RATE_BASE - (gameState.level * 100));
@@ -741,8 +768,8 @@
 
                 gameState.cubes.forEach(c => {
                     if(c.active) {
-                        c.mesh.position.z += (c.z - c.mesh.position.z) * 0.2;
-                        c.mesh.rotation.x += ((c.z * (Math.PI/2)) - c.mesh.rotation.x) * 0.2;
+                        c.mesh.position.z += (c.z - c.mesh.position.z) * 0.25;
+                        c.mesh.rotation.x += ((c.z * (Math.PI/2)) - c.mesh.rotation.x) * 0.25;
                     }
                 });
             }
@@ -755,8 +782,9 @@
             gameState.cubes.forEach(c => {
                 if(c.active) {
                     c.z++;
-                    if(c.x === gameState.playerX && c.z === gameState.playerZ) {
-                        gameState.playerZ++;
+                    // Push player if block rolls into player position
+                    if(Math.abs(c.x - gameState.playerX) < 0.85 && Math.abs(c.z - gameState.playerZ) < 0.85) {
+                        gameState.playerZ = c.z + 0.85;
                         if(gameState.playerZ > maxZ) gameOver();
                     }
                 }
@@ -815,8 +843,8 @@
             }
 
             gameState.lostRows = 0;
-            gameState.playerX = 3;
-            gameState.playerZ = 27;
+            gameState.playerX = 3.0;
+            gameState.playerZ = 27.0;
             gameState.markX = -1;
             gameState.markZ = -1;
             gameState.advMarks = [];
@@ -829,13 +857,15 @@
             advMarkMeshes = [];
 
             clearAllCubes();
-            moveInput = { dx: 0, dz: 0 };
+            joystickVector = { x: 0, z: 0 };
+            keysPressed = {};
 
             buildStage();
             spawnWave();
             updateUI();
             
             gameState.isPlaying = true;
+            lastFrameTime = performance.now();
             lastTickTime = performance.now();
         }
 
